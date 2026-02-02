@@ -7,10 +7,17 @@ Aplicação de linha de comando para registrar e consultar pagamentos
 
 import os
 import sys
-import csv
+import sqlite3
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
+from pathlib import Path
+
+
+# Configuração de diretórios
+CONFIG_DIR = os.path.expanduser("~/.pagto")
+DB_PATH = os.path.join(CONFIG_DIR, "pagamentos.db")
+COMPROVANTES_DIR = os.path.join(CONFIG_DIR, "comprovantes")
 
 
 class Pagamento:
@@ -18,8 +25,8 @@ class Pagamento:
     
     def __init__(self, categoria: str, beneficiario: str, conta: str, 
                  valor: float, data_pagamento: str = None, devendo_para: str = "",
-                 id_pagamento: str = None, pendente: bool = False, deletado: bool = False,
-                 comprovante: str = ""):
+                 id_pagamento: int = None, pendente: bool = False, deletado: bool = False,
+                 comprovante: str = "", observacao: str = ""):
         self.id = id_pagamento
         self.categoria = categoria
         self.beneficiario = beneficiario
@@ -30,6 +37,7 @@ class Pagamento:
         self.pendente = pendente
         self.deletado = deletado
         self.comprovante = comprovante
+        self.observacao = observacao
     
     def to_dict(self) -> Dict:
         """Converte o pagamento para dicionário"""
@@ -39,78 +47,116 @@ class Pagamento:
             'beneficiario': self.beneficiario,
             'data_pagamento': self.data_pagamento,
             'conta': self.conta,
-            'valor': str(self.valor),
+            'valor': self.valor,
             'devendo_para': self.devendo_para,
-            'pendente': '1' if self.pendente else '0',
-            'deletado': '1' if self.deletado else '0',
-            'comprovante': self.comprovante
+            'pendente': 1 if self.pendente else 0,
+            'deletado': 1 if self.deletado else 0,
+            'comprovante': self.comprovante,
+            'observacao': self.observacao
         }
 
 
 class GerenciadorPagamentos:
-    """Classe para gerenciar os pagamentos"""
-    
-    ARQUIVO_DADOS = 'pagamentos.csv'
-    PASTA_COMPROVANTES = 'comprovantes'
-    CAMPOS = ['id', 'categoria', 'beneficiario', 'data_pagamento', 'conta', 'valor', 'devendo_para', 'pendente', 'deletado', 'comprovante']
+    """Classe para gerenciar os pagamentos com SQLite"""
     
     def __init__(self):
-        self._garantir_arquivo_existe()
-        self._garantir_pasta_comprovantes()
-        self._migrar_dados_antigos()
+        self._garantir_diretorios()
+        self._garantir_banco()
+        self._migrar_csv_se_necessario()
     
-    def _garantir_arquivo_existe(self):
-        """Garante que o arquivo CSV existe com os cabeçalhos corretos"""
-        if not os.path.exists(self.ARQUIVO_DADOS):
-            with open(self.ARQUIVO_DADOS, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=self.CAMPOS)
-                writer.writeheader()
+    def _garantir_diretorios(self):
+        """Garante que os diretórios necessários existem"""
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        os.makedirs(COMPROVANTES_DIR, exist_ok=True)
     
-    def _garantir_pasta_comprovantes(self):
-        """Garante que a pasta de comprovantes existe"""
-        if not os.path.exists(self.PASTA_COMPROVANTES):
-            os.makedirs(self.PASTA_COMPROVANTES)
-    
-    def _migrar_dados_antigos(self):
-        """Migra dados de versões antigas para incluir novos campos"""
-        try:
-            with open(self.ARQUIVO_DADOS, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                campos_atuais = reader.fieldnames
-                
-                # Se não tem o campo 'id' ou 'comprovante', precisa migrar
-                if campos_atuais and ('id' not in campos_atuais or 'comprovante' not in campos_atuais):
-                    dados = list(reader)
-                    
-                    # Fecha o arquivo e reescreve com novos campos
-                    with open(self.ARQUIVO_DADOS, 'w', newline='', encoding='utf-8') as fw:
-                        writer = csv.DictWriter(fw, fieldnames=self.CAMPOS)
-                        writer.writeheader()
-                        
-                        for idx, row in enumerate(dados, start=1):
-                            if 'id' not in row or not row.get('id'):
-                                row['id'] = str(idx)
-                            row['pendente'] = row.get('pendente', '0')
-                            row['deletado'] = row.get('deletado', '0')
-                            row['comprovante'] = row.get('comprovante', '')
-                            # Garante que todos os campos existem
-                            for campo in self.CAMPOS:
-                                if campo not in row:
-                                    row[campo] = ''
-                            writer.writerow(row)
-        except FileNotFoundError:
-            pass
-    
-    def _gerar_novo_id(self) -> str:
-        """Gera um novo ID único"""
-        pagamentos = self._listar_todos_incluindo_deletados()
-        if not pagamentos:
-            return "1"
+    def _garantir_banco(self):
+        """Cria o banco de dados e tabelas se não existirem"""
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        ids_existentes = [int(p.get('id', 0)) for p in pagamentos if p.get('id', '').isdigit()]
-        return str(max(ids_existentes) + 1) if ids_existentes else "1"
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pagamentos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                categoria TEXT NOT NULL,
+                beneficiario TEXT NOT NULL,
+                data_pagamento TEXT NOT NULL,
+                conta TEXT NOT NULL,
+                valor REAL NOT NULL,
+                devendo_para TEXT,
+                pendente INTEGER DEFAULT 0,
+                deletado INTEGER DEFAULT 0,
+                comprovante TEXT,
+                observacao TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Verifica se precisa adicionar coluna observacao (migração de versões antigas)
+        cursor.execute("PRAGMA table_info(pagamentos)")
+        colunas = [col[1] for col in cursor.fetchall()]
+        
+        if 'observacao' not in colunas:
+            cursor.execute('ALTER TABLE pagamentos ADD COLUMN observacao TEXT')
+        
+        conn.commit()
+        conn.close()
     
-    def _copiar_comprovante(self, caminho_origem: str, id_pagamento: str, beneficiario: str, valor: float) -> str:
+    def _migrar_csv_se_necessario(self):
+        """Migra dados de CSV antigo se existir"""
+        csv_path = os.path.join(os.getcwd(), 'pagamentos.csv')
+        
+        if not os.path.exists(csv_path):
+            return
+        
+        print("\n🔄 Detectado arquivo CSV antigo. Migrando para SQLite...")
+        
+        try:
+            import csv
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            
+            # Verifica se já tem dados
+            cursor.execute("SELECT COUNT(*) FROM pagamentos")
+            if cursor.fetchone()[0] > 0:
+                print("⚠ Banco já contém dados. Migração cancelada.")
+                conn.close()
+                return
+            
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                migrados = 0
+                
+                for row in reader:
+                    cursor.execute('''
+                        INSERT INTO pagamentos 
+                        (categoria, beneficiario, data_pagamento, conta, valor, 
+                         devendo_para, pendente, deletado, comprovante, observacao)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        row.get('categoria', ''),
+                        row.get('beneficiario', ''),
+                        row.get('data_pagamento', ''),
+                        row.get('conta', ''),
+                        float(row.get('valor', 0)),
+                        row.get('devendo_para', ''),
+                        int(row.get('pendente', 0)),
+                        int(row.get('deletado', 0)),
+                        row.get('comprovante', ''),
+                        row.get('observacao', '')
+                    ))
+                    migrados += 1
+            
+            conn.commit()
+            conn.close()
+            
+            print(f"✓ {migrados} registros migrados com sucesso!")
+            print(f"✓ Banco de dados criado em: {DB_PATH}")
+            print(f"⚠ Você pode fazer backup e remover o arquivo CSV antigo: {csv_path}\n")
+            
+        except Exception as e:
+            print(f"✗ Erro na migração: {e}")
+    
+    def _copiar_comprovante(self, caminho_origem: str, id_pagamento: int, beneficiario: str, valor: float) -> str:
         """Copia o comprovante para a pasta e retorna o novo nome"""
         if not caminho_origem or not os.path.exists(caminho_origem):
             return ""
@@ -127,7 +173,7 @@ class GerenciadorPagamentos:
         
         # Monta o novo nome: ID_BENEFICIARIO_VALOR.extensao
         novo_nome = f"{id_pagamento}_{beneficiario_limpo}_{valor_arredondado}{extensao}"
-        caminho_destino = os.path.join(self.PASTA_COMPROVANTES, novo_nome)
+        caminho_destino = os.path.join(COMPROVANTES_DIR, novo_nome)
         
         # Copia o arquivo
         import shutil
@@ -138,231 +184,315 @@ class GerenciadorPagamentos:
             print(f"  ⚠ Erro ao copiar comprovante: {e}")
             return ""
     
-    def _listar_todos_incluindo_deletados(self) -> List[Dict]:
-        """Lista TODOS os pagamentos, incluindo deletados"""
-        pagamentos = []
-        try:
-            with open(self.ARQUIVO_DADOS, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    pagamentos.append(row)
-        except FileNotFoundError:
-            pass
-        return pagamentos
-    
-    def _aplicar_filtros(self, pagamentos: List[Dict], filtros: Dict[str, str]) -> List[Dict]:
-        """Aplica filtros aos pagamentos"""
+    def _aplicar_filtros_sql(self, filtros: Dict[str, str]) -> Tuple[str, List]:
+        """Gera cláusula WHERE e parâmetros para filtros SQL"""
         if not filtros:
-            return pagamentos
+            return "", []
         
-        pagamentos_filtrados = []
-        for pag in pagamentos:
-            incluir = True
-            for campo, valor_filtro in filtros.items():
-                campo_lower = campo.lower()
-                valor_filtro_lower = valor_filtro.lower()
-                
-                # Mapeia campos para os nomes reais no CSV
-                mapeamento_campos = {
-                    'categoria': 'categoria',
-                    'beneficiario': 'beneficiario',
-                    'conta': 'conta',
-                    'devendo': 'devendo_para',
-                    'devendo_para': 'devendo_para',
-                    'pendente': 'pendente',
-                    'data': 'data_pagamento',
-                    'data_pagamento': 'data_pagamento',
-                    'id': 'id',
-                    'valor': 'valor',
-                    'comprovante': 'comprovante'
-                }
-                
-                campo_real = mapeamento_campos.get(campo_lower, campo_lower)
-                
-                if campo_real not in pag:
-                    continue
-                
-                valor_campo = str(pag.get(campo_real, '')).lower()
-                
-                # Tratamento especial para campo pendente
-                if campo_real == 'pendente':
-                    # Aceita: s, sim, 1, true, n, nao, não, 0, false
-                    valor_esperado = '1' if valor_filtro_lower in ['s', 'sim', '1', 'true', 'yes'] else '0'
-                    if valor_campo != valor_esperado:
-                        incluir = False
-                        break
-                # Tratamento especial para valor (permite filtros numéricos)
-                elif campo_real == 'valor':
-                    try:
-                        valor_pag = float(pag.get(campo_real, 0))
-                        # Suporta: >100, <50, >=200, <=300, 150
-                        if valor_filtro_lower.startswith('>='):
-                            if not valor_pag >= float(valor_filtro_lower[2:]):
-                                incluir = False
-                                break
-                        elif valor_filtro_lower.startswith('<='):
-                            if not valor_pag <= float(valor_filtro_lower[2:]):
-                                incluir = False
-                                break
-                        elif valor_filtro_lower.startswith('>'):
-                            if not valor_pag > float(valor_filtro_lower[1:]):
-                                incluir = False
-                                break
-                        elif valor_filtro_lower.startswith('<'):
-                            if not valor_pag < float(valor_filtro_lower[1:]):
-                                incluir = False
-                                break
-                        else:
-                            if abs(valor_pag - float(valor_filtro_lower)) > 0.01:
-                                incluir = False
-                                break
-                    except ValueError:
-                        incluir = False
-                        break
-                # Para outros campos, faz busca parcial (contains)
-                else:
-                    if valor_filtro_lower not in valor_campo:
-                        incluir = False
-                        break
+        condicoes = []
+        parametros = []
+        
+        # Mapeamento de campos
+        mapeamento = {
+            'categoria': 'categoria',
+            'beneficiario': 'beneficiario',
+            'conta': 'conta',
+            'devendo': 'devendo_para',
+            'devendo_para': 'devendo_para',
+            'pendente': 'pendente',
+            'data': 'data_pagamento',
+            'data_pagamento': 'data_pagamento',
+            'id': 'id',
+            'valor': 'valor',
+            'comprovante': 'comprovante',
+            'observacao': 'observacao'
+        }
+        
+        for campo, valor_filtro in filtros.items():
+            campo_lower = campo.lower()
+            campo_real = mapeamento.get(campo_lower, campo_lower)
+            valor_filtro_lower = valor_filtro.lower()
             
-            if incluir:
-                pagamentos_filtrados.append(pag)
+            if campo_real == 'pendente':
+                valor_esperado = 1 if valor_filtro_lower in ['s', 'sim', '1', 'true', 'yes'] else 0
+                condicoes.append(f"{campo_real} = ?")
+                parametros.append(valor_esperado)
+            
+            elif campo_real == 'valor':
+                if valor_filtro_lower.startswith('>='):
+                    condicoes.append(f"{campo_real} >= ?")
+                    parametros.append(float(valor_filtro_lower[2:]))
+                elif valor_filtro_lower.startswith('<='):
+                    condicoes.append(f"{campo_real} <= ?")
+                    parametros.append(float(valor_filtro_lower[2:]))
+                elif valor_filtro_lower.startswith('>'):
+                    condicoes.append(f"{campo_real} > ?")
+                    parametros.append(float(valor_filtro_lower[1:]))
+                elif valor_filtro_lower.startswith('<'):
+                    condicoes.append(f"{campo_real} < ?")
+                    parametros.append(float(valor_filtro_lower[1:]))
+                else:
+                    condicoes.append(f"{campo_real} = ?")
+                    parametros.append(float(valor_filtro_lower))
+            
+            elif campo_real == 'id':
+                condicoes.append(f"{campo_real} = ?")
+                parametros.append(int(valor_filtro))
+            
+            else:
+                # Busca parcial case-insensitive
+                condicoes.append(f"LOWER({campo_real}) LIKE ?")
+                parametros.append(f"%{valor_filtro_lower}%")
         
-        return pagamentos_filtrados
+        where_clause = " AND ".join(condicoes)
+        return where_clause, parametros
     
-    def adicionar_pagamento(self, pagamento: Pagamento, caminho_comprovante: str = None):
-        """Adiciona um novo pagamento ao arquivo"""
-        # Gera ID se não fornecido
-        if not pagamento.id:
-            pagamento.id = self._gerar_novo_id()
+    def _parsear_ordenacao(self, sort_value: str) -> str:
+        """Parseia o valor de ordenação e retorna cláusula ORDER BY"""
+        if not sort_value:
+            return "data_pagamento ASC, id ASC"  # Padrão: data ascendente
+        
+        # Remove prefixo - se houver (indica descendente)
+        descendente = sort_value.startswith('-')
+        campo = sort_value[1:] if descendente else sort_value
+        
+        # Mapeamento de campos
+        mapeamento = {
+            'data': 'data_pagamento',
+            'valor': 'valor',
+            'categoria': 'categoria',
+            'beneficiario': 'beneficiario',
+            'conta': 'conta',
+            'id': 'id'
+        }
+        
+        campo_sql = mapeamento.get(campo.lower(), 'data_pagamento')
+        direcao = 'DESC' if descendente else 'ASC'
+        
+        return f"{campo_sql} {direcao}, id ASC"
+    
+    def adicionar_pagamento(self, pagamento: Pagamento, caminho_comprovante: str = None) -> Optional[int]:
+        """Adiciona um novo pagamento ao banco"""
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO pagamentos 
+            (categoria, beneficiario, data_pagamento, conta, valor, 
+             devendo_para, pendente, deletado, comprovante, observacao)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            pagamento.categoria,
+            pagamento.beneficiario,
+            pagamento.data_pagamento,
+            pagamento.conta,
+            pagamento.valor,
+            pagamento.devendo_para,
+            1 if pagamento.pendente else 0,
+            1 if pagamento.deletado else 0,
+            pagamento.comprovante,
+            pagamento.observacao
+        ))
+        
+        pagamento_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
         
         # Copia o comprovante se fornecido
         if caminho_comprovante:
             nome_comprovante = self._copiar_comprovante(
-                caminho_comprovante, 
-                pagamento.id, 
-                pagamento.beneficiario, 
+                caminho_comprovante,
+                pagamento_id,
+                pagamento.beneficiario,
                 pagamento.valor
             )
-            pagamento.comprovante = nome_comprovante
+            if nome_comprovante:
+                # Atualiza o registro com o nome do comprovante
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE pagamentos SET comprovante = ? WHERE id = ?",
+                             (nome_comprovante, pagamento_id))
+                conn.commit()
+                conn.close()
         
-        with open(self.ARQUIVO_DADOS, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=self.CAMPOS)
-            writer.writerow(pagamento.to_dict())
-        
-        msg = f"\n✓ Pagamento registrado com sucesso! (ID: {pagamento.id})"
-        if pagamento.comprovante:
-            msg += f"\n✓ Comprovante salvo: {pagamento.comprovante}"
+        msg = f"\n✓ Pagamento registrado com sucesso! (ID: {pagamento_id})"
+        if caminho_comprovante and nome_comprovante:
+            msg += f"\n✓ Comprovante salvo: {nome_comprovante}"
         print(msg)
-    
-    def listar_todos(self, incluir_deletados: bool = False, filtros: Dict[str, str] = None) -> List[Dict]:
-        """Lista todos os pagamentos (excluindo deletados por padrão)"""
-        pagamentos = self._listar_todos_incluindo_deletados()
         
+        return pagamento_id
+    
+    def listar_todos(self, incluir_deletados: bool = False, filtros: Dict[str, str] = None,
+                    ordenacao: str = None) -> List[Dict]:
+        """Lista todos os pagamentos"""
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Monta a query base
+        query = "SELECT * FROM pagamentos"
+        parametros = []
+        
+        # Adiciona condição de deletados
+        condicoes = []
         if not incluir_deletados:
-            pagamentos = [p for p in pagamentos if p.get('deletado', '0') != '1']
+            condicoes.append("deletado = 0")
         
-        # Aplica filtros se fornecidos
+        # Aplica filtros
         if filtros:
-            pagamentos = self._aplicar_filtros(pagamentos, filtros)
+            # Remove 'sort' dos filtros se estiver presente
+            filtros_limpos = {k: v for k, v in filtros.items() if k.lower() != 'sort'}
+            if filtros_limpos:
+                where_filtros, params_filtros = self._aplicar_filtros_sql(filtros_limpos)
+                if where_filtros:
+                    condicoes.append(where_filtros)
+                    parametros.extend(params_filtros)
         
-        return pagamentos
+        # Adiciona WHERE se houver condições
+        if condicoes:
+            query += " WHERE " + " AND ".join(condicoes)
+        
+        # Adiciona ordenação
+        order_by = self._parsear_ordenacao(ordenacao)
+        query += f" ORDER BY {order_by}"
+        
+        cursor.execute(query, parametros)
+        resultados = cursor.fetchall()
+        conn.close()
+        
+        # Converte para lista de dicionários
+        return [dict(row) for row in resultados]
     
-    def listar_deletados(self, filtros: Dict[str, str] = None) -> List[Dict]:
+    def listar_deletados(self, filtros: Dict[str, str] = None, ordenacao: str = None) -> List[Dict]:
         """Lista apenas os pagamentos deletados"""
-        pagamentos = self._listar_todos_incluindo_deletados()
-        deletados = [p for p in pagamentos if p.get('deletado', '0') == '1']
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
         
-        # Aplica filtros se fornecidos
+        query = "SELECT * FROM pagamentos WHERE deletado = 1"
+        parametros = []
+        
+        # Aplica filtros
         if filtros:
-            deletados = self._aplicar_filtros(deletados, filtros)
+            filtros_limpos = {k: v for k, v in filtros.items() if k.lower() != 'sort'}
+            if filtros_limpos:
+                where_filtros, params_filtros = self._aplicar_filtros_sql(filtros_limpos)
+                if where_filtros:
+                    query += " AND " + where_filtros
+                    parametros.extend(params_filtros)
         
-        return deletados
+        # Adiciona ordenação
+        order_by = self._parsear_ordenacao(ordenacao)
+        query += f" ORDER BY {order_by}"
+        
+        cursor.execute(query, parametros)
+        resultados = cursor.fetchall()
+        conn.close()
+        
+        return [dict(row) for row in resultados]
     
-    def buscar_por_id(self, id_busca: str) -> Dict:
+    def buscar_por_id(self, id_busca: int) -> Optional[Dict]:
         """Busca um pagamento por ID"""
-        pagamentos = self._listar_todos_incluindo_deletados()
-        for pag in pagamentos:
-            if pag.get('id') == id_busca:
-                return pag
-        return None
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM pagamentos WHERE id = ?", (id_busca,))
+        resultado = cursor.fetchone()
+        conn.close()
+        
+        return dict(resultado) if resultado else None
     
-    def marcar_como_deletado(self, id_pagamento: str) -> bool:
+    def marcar_como_deletado(self, id_pagamento: int) -> bool:
         """Marca um pagamento como deletado"""
-        pagamentos = self._listar_todos_incluindo_deletados()
-        encontrado = False
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        for pag in pagamentos:
-            if pag.get('id') == id_pagamento:
-                pag['deletado'] = '1'
-                encontrado = True
-                break
+        cursor.execute("UPDATE pagamentos SET deletado = 1 WHERE id = ?", (id_pagamento,))
+        linhas_afetadas = cursor.rowcount
         
-        if encontrado:
-            self._reescrever_arquivo(pagamentos)
+        conn.commit()
+        conn.close()
         
-        return encontrado
+        return linhas_afetadas > 0
     
-    def atualizar_pagamento(self, id_pagamento: str, dados_atualizados: Dict, caminho_comprovante: str = None) -> bool:
+    def atualizar_pagamento(self, id_pagamento: int, dados_atualizados: Dict,
+                          caminho_comprovante: str = None) -> bool:
         """Atualiza um pagamento existente"""
-        pagamentos = self._listar_todos_incluindo_deletados()
-        encontrado = False
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        for pag in pagamentos:
-            if pag.get('id') == id_pagamento:
-                # Se há novo comprovante, copia e atualiza
-                if caminho_comprovante:
-                    try:
-                        valor = float(dados_atualizados.get('valor', pag.get('valor', 0)))
-                    except ValueError:
-                        valor = 0
-                    
-                    nome_comprovante = self._copiar_comprovante(
-                        caminho_comprovante,
-                        id_pagamento,
-                        dados_atualizados.get('beneficiario', pag.get('beneficiario', '')),
-                        valor
-                    )
-                    if nome_comprovante:
-                        dados_atualizados['comprovante'] = nome_comprovante
-                
-                # Atualiza apenas os campos fornecidos
-                for campo, valor in dados_atualizados.items():
-                    if campo in self.CAMPOS and campo != 'id':  # Não permite alterar o ID
-                        pag[campo] = valor
-                encontrado = True
-                break
+        # Se há novo comprovante, copia e atualiza
+        if caminho_comprovante:
+            beneficiario = dados_atualizados.get('beneficiario')
+            valor = dados_atualizados.get('valor', 0)
+            
+            # Se beneficiario ou valor não estão nos dados atualizados, busca do banco
+            if not beneficiario or not valor:
+                cursor.execute("SELECT beneficiario, valor FROM pagamentos WHERE id = ?",
+                             (id_pagamento,))
+                row = cursor.fetchone()
+                if row:
+                    beneficiario = beneficiario or row[0]
+                    valor = valor or row[1]
+            
+            nome_comprovante = self._copiar_comprovante(
+                caminho_comprovante,
+                id_pagamento,
+                beneficiario,
+                float(valor)
+            )
+            if nome_comprovante:
+                dados_atualizados['comprovante'] = nome_comprovante
         
-        if encontrado:
-            self._reescrever_arquivo(pagamentos)
+        # Monta a query de atualização
+        campos = []
+        valores = []
         
-        return encontrado
-    
-    def _reescrever_arquivo(self, pagamentos: List[Dict]):
-        """Reescreve o arquivo CSV com os dados atualizados"""
-        with open(self.ARQUIVO_DADOS, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=self.CAMPOS)
-            writer.writeheader()
-            for pag in pagamentos:
-                # Garante que todos os campos existem
-                for campo in self.CAMPOS:
-                    if campo not in pag:
-                        pag[campo] = ''
-                writer.writerow(pag)
+        for campo, valor in dados_atualizados.items():
+            if campo != 'id':  # Não permite alterar o ID
+                campos.append(f"{campo} = ?")
+                valores.append(valor)
+        
+        if not campos:
+            conn.close()
+            return False
+        
+        valores.append(id_pagamento)
+        query = f"UPDATE pagamentos SET {', '.join(campos)} WHERE id = ?"
+        
+        cursor.execute(query, valores)
+        linhas_afetadas = cursor.rowcount
+        
+        conn.commit()
+        conn.close()
+        
+        return linhas_afetadas > 0
     
     def agregrar_por_categoria(self, filtros: Dict[str, str] = None) -> Dict[str, float]:
-        """Agrega os valores por categoria (excluindo deletados)"""
-        categorias = defaultdict(float)
-        pagamentos = self.listar_todos(incluir_deletados=False, filtros=filtros)
+        """Agrega os valores por categoria"""
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        for pag in pagamentos:
-            try:
-                valor = float(pag['valor'])
-                categorias[pag['categoria']] += valor
-            except (ValueError, KeyError):
-                continue
+        query = "SELECT categoria, SUM(valor) as total FROM pagamentos WHERE deletado = 0"
+        parametros = []
         
-        return dict(categorias)
+        # Aplica filtros
+        if filtros:
+            filtros_limpos = {k: v for k, v in filtros.items() if k.lower() != 'sort'}
+            if filtros_limpos:
+                where_filtros, params_filtros = self._aplicar_filtros_sql(filtros_limpos)
+                if where_filtros:
+                    query += " AND " + where_filtros
+                    parametros.extend(params_filtros)
+        
+        query += " GROUP BY categoria ORDER BY categoria"
+        
+        cursor.execute(query, parametros)
+        resultados = cursor.fetchall()
+        conn.close()
+        
+        return {row[0]: row[1] for row in resultados}
 
 
 def formatar_moeda(valor: float) -> str:
@@ -370,11 +500,14 @@ def formatar_moeda(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def solicitar_input(prompt: str, obrigatorio: bool = False, default: str = None, valor_atual: str = None) -> str:
+def solicitar_input(prompt: str, obrigatorio: bool = False, default: str = None, valor_atual: str = None, permite_limpar: bool = False) -> str:
     """Solicita input do usuário com validação"""
     # Se há valor atual, mostra entre colchetes
     if valor_atual:
-        prompt_completo = f"{prompt} [{valor_atual}]: "
+        if permite_limpar:
+            prompt_completo = f"{prompt} [{valor_atual}] (LIMPAR para apagar): "
+        else:
+            prompt_completo = f"{prompt} [{valor_atual}]: "
     elif default:
         prompt_completo = f"{prompt} [{default}]: "
     else:
@@ -382,6 +515,10 @@ def solicitar_input(prompt: str, obrigatorio: bool = False, default: str = None,
     
     while True:
         valor = input(prompt_completo).strip()
+        
+        # Se digitou LIMPAR (case-insensitive), retorna string vazia
+        if permite_limpar and valor.upper() == "LIMPAR":
+            return ""
         
         if valor:
             return valor
@@ -480,17 +617,27 @@ def solicitar_comprovante() -> str:
     return caminho
 
 
-def parsear_filtros(args: List[str]) -> Dict[str, str]:
+def parsear_filtros(args: List[str]) -> Tuple[Dict[str, str], str]:
     """
     Parseia filtros da linha de comando no formato campo:valor
-    Exemplo: categoria:TRATOR pendente:S valor:>100
+    Retorna: (filtros_dict, ordenacao)
+    Exemplo: categoria:TRATOR pendente:S sort:-data
     """
     filtros = {}
+    ordenacao = None
+    
     for arg in args:
         if ':' in arg:
             campo, valor = arg.split(':', 1)
-            filtros[campo.strip()] = valor.strip()
-    return filtros
+            campo = campo.strip()
+            valor = valor.strip()
+            
+            if campo.lower() == 'sort':
+                ordenacao = valor
+            else:
+                filtros[campo] = valor
+    
+    return filtros, ordenacao
 
 
 def comando_novo():
@@ -505,6 +652,7 @@ def comando_novo():
     devendo_para = solicitar_input("Devendo para (opcional)", obrigatorio=False)
     pendente = solicitar_pendente()
     comprovante = solicitar_comprovante()
+    observacao = solicitar_input("Observação (opcional)", obrigatorio=False)
     
     pagamento = Pagamento(
         categoria=categoria,
@@ -513,17 +661,18 @@ def comando_novo():
         conta=conta,
         valor=valor,
         devendo_para=devendo_para,
-        pendente=pendente
+        pendente=pendente,
+        observacao=observacao
     )
     
     gerenciador = GerenciadorPagamentos()
     gerenciador.adicionar_pagamento(pagamento, caminho_comprovante=comprovante)
 
 
-def comando_todos(filtros: Dict[str, str] = None):
+def comando_todos(filtros: Dict[str, str] = None, ordenacao: str = None):
     """Executa o comando 'pagto todos'"""
     gerenciador = GerenciadorPagamentos()
-    pagamentos = gerenciador.listar_todos(filtros=filtros)
+    pagamentos = gerenciador.listar_todos(filtros=filtros, ordenacao=ordenacao)
     
     if not pagamentos:
         if filtros:
@@ -535,44 +684,48 @@ def comando_todos(filtros: Dict[str, str] = None):
     
     # Mostra filtros aplicados
     if filtros:
-        print(f"\n=== FILTROS APLICADOS: {filtros} ===\n")
+        print(f"\n=== FILTROS APLICADOS: {filtros} ===")
+    if ordenacao:
+        print(f"=== ORDENAÇÃO: {ordenacao} ===")
     
     print("\n=== TODOS OS PAGAMENTOS ===\n")
     
     # Cabeçalho da tabela
-    print(f"{'ID':<5} {'Data':<12} {'Categoria':<18} {'Beneficiário':<23} {'Conta':<15} {'Valor':>15} {'Status':<8} {'Comp':<4} {'Devendo':<15}")
-    print("-" * 135)
+    print(f"{'ID':<5} {'Data':<12} {'Categoria':<18} {'Beneficiário':<20} {'Valor':>13} {'Status':<8} {'📎':<3} {'Obs':<3}")
+    print("-" * 95)
     
     total = 0.0
     for pag in pagamentos:
         try:
             valor = float(pag['valor'])
             total += valor
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             valor = 0.0
         
         # Status do pagamento
-        status = "⏳ Pend." if pag.get('pendente', '0') == '1' else "✓ Pago"
+        status = "⏳ Pend." if pag.get('pendente') == 1 else "✓ Pago"
         
         # Indicador de comprovante
-        comp_icon = "📎" if pag.get('comprovante', '') else ""
+        comp_icon = "📎" if pag.get('comprovante') else ""
         
-        print(f"{pag.get('id', 'N/A'):<5} "
+        # Indicador de observação
+        obs_icon = "📝" if pag.get('observacao') else ""
+        
+        print(f"{pag.get('id', 0):<5} "
               f"{pag.get('data_pagamento', ''):<12} "
               f"{pag.get('categoria', '')[:17]:<18} "
-              f"{pag.get('beneficiario', '')[:22]:<23} "
-              f"{pag.get('conta', '')[:14]:<15} "
-              f"{formatar_moeda(valor):>15} "
+              f"{pag.get('beneficiario', '')[:19]:<20} "
+              f"{formatar_moeda(valor):>13} "
               f"{status:<8} "
-              f"{comp_icon:<4} "
-              f"{pag.get('devendo_para', '')[:14]:<15}")
+              f"{comp_icon:<3} "
+              f"{obs_icon:<3}")
     
-    print("-" * 135)
-    print(f"{'TOTAL:':<95} {formatar_moeda(total):>15}")
+    print("-" * 95)
+    print(f"{'TOTAL:':<50} {formatar_moeda(total):>13}")
     print(f"\nRegistros encontrados: {len(pagamentos)}\n")
 
 
-def comando_categoria(filtros: Dict[str, str] = None):
+def comando_categoria(filtros: Dict[str, str] = None, ordenacao: str = None):
     """Executa o comando 'pagto categoria'"""
     gerenciador = GerenciadorPagamentos()
     categorias = gerenciador.agregrar_por_categoria(filtros=filtros)
@@ -608,17 +761,23 @@ def comando_categoria(filtros: Dict[str, str] = None):
 
 def comando_delete(id_pagamento: str):
     """Executa o comando 'pagto delete [id]'"""
+    try:
+        id_int = int(id_pagamento)
+    except ValueError:
+        print(f"\n✗ ID inválido: {id_pagamento}")
+        return
+    
     gerenciador = GerenciadorPagamentos()
     
     # Verifica se o pagamento existe
-    pagamento = gerenciador.buscar_por_id(id_pagamento)
+    pagamento = gerenciador.buscar_por_id(id_int)
     
     if not pagamento:
         print(f"\n✗ Pagamento com ID {id_pagamento} não encontrado.")
         return
     
     # Verifica se já está deletado
-    if pagamento.get('deletado', '0') == '1':
+    if pagamento.get('deletado') == 1:
         print(f"\n⚠ Pagamento ID {id_pagamento} já está deletado.")
         return
     
@@ -634,7 +793,7 @@ def comando_delete(id_pagamento: str):
     confirmacao = input("\nDeseja realmente deletar este pagamento? (s/n): ").strip().lower()
     
     if confirmacao in ['s', 'sim', 'yes', 'y']:
-        if gerenciador.marcar_como_deletado(id_pagamento):
+        if gerenciador.marcar_como_deletado(id_int):
             print(f"\n✓ Pagamento ID {id_pagamento} deletado com sucesso!")
         else:
             print(f"\n✗ Erro ao deletar pagamento.")
@@ -642,10 +801,10 @@ def comando_delete(id_pagamento: str):
         print("\n✗ Operação cancelada.")
 
 
-def comando_deletados(filtros: Dict[str, str] = None):
+def comando_deletados(filtros: Dict[str, str] = None, ordenacao: str = None):
     """Executa o comando 'pagto deletados'"""
     gerenciador = GerenciadorPagamentos()
-    pagamentos = gerenciador.listar_deletados(filtros=filtros)
+    pagamentos = gerenciador.listar_deletados(filtros=filtros, ordenacao=ordenacao)
     
     if not pagamentos:
         if filtros:
@@ -657,78 +816,93 @@ def comando_deletados(filtros: Dict[str, str] = None):
     
     # Mostra filtros aplicados
     if filtros:
-        print(f"\n=== FILTROS APLICADOS: {filtros} ===\n")
+        print(f"\n=== FILTROS APLICADOS: {filtros} ===")
+    if ordenacao:
+        print(f"=== ORDENAÇÃO: {ordenacao} ===")
     
     print("\n=== PAGAMENTOS DELETADOS ===\n")
     
-    # Cabeçalho da tabela
-    print(f"{'ID':<5} {'Data':<12} {'Categoria':<18} {'Beneficiário':<23} {'Conta':<15} {'Valor':>15} {'Comp':<4} {'Devendo':<15}")
-    print("-" * 125)
+    # Cabeçalho da tabela  
+    print(f"{'ID':<5} {'Data':<12} {'Categoria':<18} {'Beneficiário':<20} {'Valor':>13} {'📎':<3} {'📝':<3}")
+    print("-" * 85)
     
     total = 0.0
     for pag in pagamentos:
         try:
             valor = float(pag['valor'])
             total += valor
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             valor = 0.0
         
         # Indicador de comprovante
-        comp_icon = "📎" if pag.get('comprovante', '') else ""
+        comp_icon = "📎" if pag.get('comprovante') else ""
         
-        print(f"{pag.get('id', 'N/A'):<5} "
+        # Indicador de observação
+        obs_icon = "📝" if pag.get('observacao') else ""
+        
+        print(f"{pag.get('id', 0):<5} "
               f"{pag.get('data_pagamento', ''):<12} "
               f"{pag.get('categoria', '')[:17]:<18} "
-              f"{pag.get('beneficiario', '')[:22]:<23} "
-              f"{pag.get('conta', '')[:14]:<15} "
-              f"{formatar_moeda(valor):>15} "
-              f"{comp_icon:<4} "
-              f"{pag.get('devendo_para', '')[:14]:<15}")
+              f"{pag.get('beneficiario', '')[:19]:<20} "
+              f"{formatar_moeda(valor):>13} "
+              f"{comp_icon:<3} "
+              f"{obs_icon:<3}")
     
-    print("-" * 125)
-    print(f"{'TOTAL:':<88} {formatar_moeda(total):>15}")
+    print("-" * 85)
+    print(f"{'TOTAL:':<50} {formatar_moeda(total):>13}")
     print(f"\nRegistros encontrados: {len(pagamentos)}\n")
 
 
 def comando_editar(id_pagamento: str):
     """Executa o comando 'pagto editar [id]'"""
+    try:
+        id_int = int(id_pagamento)
+    except ValueError:
+        print(f"\n✗ ID inválido: {id_pagamento}")
+        return
+    
     gerenciador = GerenciadorPagamentos()
     
     # Verifica se o pagamento existe
-    pagamento = gerenciador.buscar_por_id(id_pagamento)
+    pagamento = gerenciador.buscar_por_id(id_int)
     
     if not pagamento:
         print(f"\n✗ Pagamento com ID {id_pagamento} não encontrado.")
         return
     
     # Verifica se está deletado
-    if pagamento.get('deletado', '0') == '1':
+    if pagamento.get('deletado') == 1:
         print(f"\n✗ Não é possível editar um pagamento deletado.")
         return
     
     print(f"\n=== EDITAR PAGAMENTO (ID: {id_pagamento}) ===\n")
-    print("Pressione ENTER para manter o valor atual\n")
+    print("Pressione ENTER para manter o valor atual")
+    print("Digite LIMPAR para apagar o campo\n")
     
     # Mostra comprovante atual se existir
     if pagamento.get('comprovante'):
-        print(f"📎 Comprovante atual: {pagamento.get('comprovante')}\n")
+        print(f"📎 Comprovante atual: {pagamento.get('comprovante')}")
+    
+    # Mostra observação atual se existir
+    if pagamento.get('observacao'):
+        print(f"📝 Observação atual: {pagamento.get('observacao')}\n")
     
     # Solicita novos valores (mostrando os atuais)
     categoria = solicitar_input("Categoria", obrigatorio=True, valor_atual=pagamento.get('categoria'))
     beneficiario = solicitar_input("Beneficiário", obrigatorio=True, valor_atual=pagamento.get('beneficiario'))
     data_pagamento = solicitar_data(valor_atual=pagamento.get('data_pagamento'))
     conta = solicitar_input("Conta", obrigatorio=True, valor_atual=pagamento.get('conta'))
-    valor = solicitar_valor(valor_atual=pagamento.get('valor'))
-    devendo_para = solicitar_input("Devendo para (opcional)", obrigatorio=False, valor_atual=pagamento.get('devendo_para'))
-    pendente = solicitar_pendente(valor_atual=pagamento.get('pendente'))
+    valor = solicitar_valor(valor_atual=str(pagamento.get('valor')))
+    devendo_para = solicitar_input("Devendo para", obrigatorio=False, valor_atual=pagamento.get('devendo_para'), permite_limpar=True)
+    pendente = solicitar_pendente(valor_atual=str(pagamento.get('pendente')))
+    observacao = solicitar_input("Observação", obrigatorio=False, valor_atual=pagamento.get('observacao'), permite_limpar=True)
     
     # Pergunta sobre comprovante
+    comprovante = None
     if pagamento.get('comprovante'):
         atualizar_comprovante = input("Atualizar comprovante? (s/n) [Não]: ").strip().lower()
         if atualizar_comprovante in ['s', 'sim', 'yes', 'y']:
             comprovante = solicitar_comprovante()
-        else:
-            comprovante = None
     else:
         print("Adicionar comprovante:")
         comprovante = solicitar_comprovante()
@@ -739,13 +913,14 @@ def comando_editar(id_pagamento: str):
         'beneficiario': beneficiario,
         'data_pagamento': data_pagamento,
         'conta': conta,
-        'valor': str(valor),
+        'valor': valor,
         'devendo_para': devendo_para,
-        'pendente': '1' if pendente else '0'
+        'pendente': 1 if pendente else 0,
+        'observacao': observacao
     }
     
     # Atualiza o pagamento
-    if gerenciador.atualizar_pagamento(id_pagamento, dados_atualizados, caminho_comprovante=comprovante):
+    if gerenciador.atualizar_pagamento(id_int, dados_atualizados, caminho_comprovante=comprovante):
         print(f"\n✓ Pagamento ID {id_pagamento} atualizado com sucesso!")
         if comprovante:
             print(f"✓ Comprovante atualizado!")
@@ -755,12 +930,15 @@ def comando_editar(id_pagamento: str):
 
 def mostrar_ajuda():
     """Mostra a ajuda do programa"""
-    print("""
+    print(f"""
 === SISTEMA DE GERENCIAMENTO DE PAGAMENTOS ===
+
+📁 Banco de dados: {DB_PATH}
+📎 Comprovantes: {COMPROVANTES_DIR}
 
 Comandos disponíveis:
 
-  pagto novo              - Registra um novo pagamento (com opção de comprovante)
+  pagto novo              - Registra um novo pagamento (com comprovante e observação)
   pagto todos             - Lista todos os pagamentos em formato tabular
   pagto categoria         - Mostra total agregado por categoria
   pagto delete [id]       - Marca um pagamento como deletado
@@ -772,37 +950,55 @@ Filtros (aplicáveis em todos, categoria e deletados):
   Use o formato campo:valor para filtrar resultados
   
   Campos disponíveis:
-    categoria, beneficiario, conta, devendo, pendente, data, valor, id
+    categoria, beneficiario, conta, devendo, pendente, data, valor, id, observacao
   
   Exemplos de filtros:
-    categoria:TRATOR           - Filtra por categoria exata
+    categoria:TRATOR           - Filtra por categoria
     pendente:s                 - Mostra apenas pendentes
-    pendente:n                 - Mostra apenas pagos
     valor:>100                 - Valores maiores que 100
-    valor:<=500                - Valores menores ou iguais a 500
-    conta:Nubank               - Pagamentos da conta Nubank
-    beneficiario:maria         - Beneficiários que contêm "maria"
+    beneficiario:silva         - Beneficiários que contêm "silva"
 
-Exemplos de uso:
+Ordenação (aplicável em todos e deletados):
+  Use sort:campo ou sort:-campo para ordenar resultados
+  
+  Campos de ordenação:
+    data, valor, categoria, beneficiario, conta, id
+  
+  Exemplos:
+    sort:data                  - Ordena por data ascendente (padrão)
+    sort:-data                 - Ordena por data descendente
+    sort:valor                 - Ordena por valor ascendente
+    sort:-valor                - Ordena por valor descendente
+
+Edição de campos:
+  Durante a edição, use a palavra LIMPAR para apagar um campo opcional
+  Exemplo: ao editar "Devendo para", digite LIMPAR para remover o valor
+
+Exemplos de uso completo:
 
   # Comandos básicos
-  python pagto.py novo
-  python pagto.py todos
-  python pagto.py categoria
-  python pagto.py delete 5
-  python pagto.py deletados
-  python pagto.py editar 3
+  pagto novo
+  pagto todos
+  pagto categoria
+  pagto delete 5
+  pagto editar 3
   
   # Com filtros
-  python pagto.py todos categoria:Alimentação pendente:s
-  python pagto.py categoria conta:Nubank
-  python pagto.py todos valor:>100 beneficiario:supermercado
-  python pagto.py deletados categoria:TRATOR
+  pagto todos categoria:Alimentação pendente:s
+  pagto categoria conta:Nubank
+  pagto todos valor:>100 beneficiario:supermercado
+  
+  # Com ordenação
+  pagto todos sort:-data                    # Mais recentes primeiro
+  pagto todos sort:valor                     # Menor valor primeiro
+  pagto todos categoria:TRATOR sort:-valor   # TRATOR, maior valor primeiro
+  pagto deletados sort:-data                 # Deletados mais recentes primeiro
 
-Comprovantes:
-  📎 = Indica que o pagamento possui comprovante anexado
-  Os comprovantes são salvos na pasta 'comprovantes/' com nomenclatura:
-  [ID]_[BENEFICIARIO]_[VALOR].[extensão]
+Ícones nos relatórios:
+  📎 = Pagamento possui comprovante anexado
+  📝 = Pagamento possui observação
+  ⏳ = Pagamento pendente
+  ✓ = Pagamento concluído
 """)
 
 
@@ -815,15 +1011,15 @@ def main():
     
     comando = sys.argv[1].lower()
     
-    # Parseia filtros dos argumentos restantes (formato campo:valor)
-    filtros = parsear_filtros(sys.argv[2:]) if len(sys.argv) > 2 else {}
+    # Parseia filtros e ordenação dos argumentos restantes
+    filtros, ordenacao = parsear_filtros(sys.argv[2:]) if len(sys.argv) > 2 else ({}, None)
     
     if comando == "novo":
         comando_novo()
     elif comando == "todos":
-        comando_todos(filtros=filtros if filtros else None)
+        comando_todos(filtros=filtros if filtros else None, ordenacao=ordenacao)
     elif comando == "categoria":
-        comando_categoria(filtros=filtros if filtros else None)
+        comando_categoria(filtros=filtros if filtros else None, ordenacao=ordenacao)
     elif comando == "delete":
         # Para delete, o segundo argumento é o ID, não um filtro
         if len(sys.argv) < 3 or ':' in sys.argv[2]:
@@ -832,7 +1028,7 @@ def main():
             sys.exit(1)
         comando_delete(sys.argv[2])
     elif comando == "deletados":
-        comando_deletados(filtros=filtros if filtros else None)
+        comando_deletados(filtros=filtros if filtros else None, ordenacao=ordenacao)
     elif comando == "editar":
         # Para editar, o segundo argumento é o ID, não um filtro
         if len(sys.argv) < 3 or ':' in sys.argv[2]:
