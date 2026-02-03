@@ -26,7 +26,7 @@ class Pagamento:
     def __init__(self, categoria: str, beneficiario: str, conta: str, 
                  valor: float, data_pagamento: str = None, devendo_para: str = "",
                  id_pagamento: int = None, pendente: bool = False, deletado: bool = False,
-                 comprovante: str = "", observacao: str = "", contexto: str = "pessoal"):
+                 comprovante: str = "", observacao: str = ""):
         self.id = id_pagamento
         self.categoria = categoria
         self.beneficiario = beneficiario
@@ -38,7 +38,6 @@ class Pagamento:
         self.deletado = deletado
         self.comprovante = comprovante
         self.observacao = observacao
-        self.contexto = contexto or "pessoal"
     
     def to_dict(self) -> Dict:
         """Converte o pagamento para dicionário"""
@@ -53,8 +52,7 @@ class Pagamento:
             'pendente': 1 if self.pendente else 0,
             'deletado': 1 if self.deletado else 0,
             'comprovante': self.comprovante,
-            'observacao': self.observacao,
-            'contexto': self.contexto
+            'observacao': self.observacao
         }
 
 
@@ -89,22 +87,16 @@ class GerenciadorPagamentos:
                 deletado INTEGER DEFAULT 0,
                 comprovante TEXT,
                 observacao TEXT,
-                contexto TEXT DEFAULT 'pessoal',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # Verifica se precisa adicionar colunas (migração de versões antigas)
+        # Verifica se precisa adicionar coluna observacao (migração de versões antigas)
         cursor.execute("PRAGMA table_info(pagamentos)")
         colunas = [col[1] for col in cursor.fetchall()]
         
         if 'observacao' not in colunas:
             cursor.execute('ALTER TABLE pagamentos ADD COLUMN observacao TEXT')
-        
-        if 'contexto' not in colunas:
-            cursor.execute("ALTER TABLE pagamentos ADD COLUMN contexto TEXT DEFAULT 'pessoal'")
-            # Atualiza registros existentes que têm contexto NULL
-            cursor.execute("UPDATE pagamentos SET contexto = 'pessoal' WHERE contexto IS NULL")
         
         conn.commit()
         conn.close()
@@ -138,8 +130,8 @@ class GerenciadorPagamentos:
                     cursor.execute('''
                         INSERT INTO pagamentos 
                         (categoria, beneficiario, data_pagamento, conta, valor, 
-                         devendo_para, pendente, deletado, comprovante, observacao, contexto)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         devendo_para, pendente, deletado, comprovante, observacao)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
                         row.get('categoria', ''),
                         row.get('beneficiario', ''),
@@ -150,8 +142,7 @@ class GerenciadorPagamentos:
                         int(row.get('pendente', 0)),
                         int(row.get('deletado', 0)),
                         row.get('comprovante', ''),
-                        row.get('observacao', ''),
-                        row.get('contexto', 'pessoal')
+                        row.get('observacao', '')
                     ))
                     migrados += 1
             
@@ -214,8 +205,7 @@ class GerenciadorPagamentos:
             'id': 'id',
             'valor': 'valor',
             'comprovante': 'comprovante',
-            'observacao': 'observacao',
-            'contexto': 'contexto'
+            'observacao': 'observacao'
         }
         
         for campo, valor_filtro in filtros.items():
@@ -289,8 +279,8 @@ class GerenciadorPagamentos:
         cursor.execute('''
             INSERT INTO pagamentos 
             (categoria, beneficiario, data_pagamento, conta, valor, 
-             devendo_para, pendente, deletado, comprovante, observacao, contexto)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             devendo_para, pendente, deletado, comprovante, observacao)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             pagamento.categoria,
             pagamento.beneficiario,
@@ -301,8 +291,7 @@ class GerenciadorPagamentos:
             1 if pagamento.pendente else 0,
             1 if pagamento.deletado else 0,
             pagamento.comprovante,
-            pagamento.observacao,
-            pagamento.contexto
+            pagamento.observacao
         ))
         
         pagamento_id = cursor.lastrowid
@@ -326,7 +315,7 @@ class GerenciadorPagamentos:
                 conn.commit()
                 conn.close()
         
-        msg = f"\n✓ Pagamento registrado com sucesso! (ID: {pagamento_id}, Contexto: {pagamento.contexto})"
+        msg = f"\n✓ Pagamento registrado com sucesso! (ID: {pagamento_id})"
         if caminho_comprovante and nome_comprovante:
             msg += f"\n✓ Comprovante salvo: {nome_comprovante}"
         print(msg)
@@ -504,36 +493,6 @@ class GerenciadorPagamentos:
         conn.close()
         
         return {row[0]: row[1] for row in resultados}
-    
-    def listar_contextos(self) -> List[Dict[str, any]]:
-        """Lista todos os contextos com estatísticas"""
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT 
-                contexto,
-                COUNT(*) as total_registros,
-                SUM(CASE WHEN deletado = 0 THEN 1 ELSE 0 END) as ativos,
-                SUM(CASE WHEN deletado = 0 THEN valor ELSE 0 END) as total_valor
-            FROM pagamentos
-            GROUP BY contexto
-            ORDER BY contexto
-        ''')
-        
-        resultados = cursor.fetchall()
-        conn.close()
-        
-        contextos = []
-        for row in resultados:
-            contextos.append({
-                'contexto': row[0],
-                'total_registros': row[1],
-                'ativos': row[2],
-                'total_valor': row[3]
-            })
-        
-        return contextos
 
 
 def formatar_moeda(valor: float) -> str:
@@ -658,27 +617,6 @@ def solicitar_comprovante() -> str:
     return caminho
 
 
-def solicitar_contexto(valor_atual: str = None) -> str:
-    """Solicita o contexto do pagamento"""
-    # Lista contextos existentes
-    gerenciador = GerenciadorPagamentos()
-    contextos = gerenciador.listar_contextos()
-    
-    if contextos:
-        contextos_unicos = sorted(set([c['contexto'] for c in contextos]))
-        print(f"  Contextos disponíveis: {', '.join(contextos_unicos)}")
-    
-    if valor_atual:
-        contexto = input(f"Contexto [{valor_atual}]: ").strip().lower()
-    else:
-        contexto = input("Contexto [pessoal]: ").strip().lower()
-    
-    if not contexto:
-        return valor_atual if valor_atual else "pessoal"
-    
-    return contexto
-
-
 def parsear_filtros(args: List[str]) -> Tuple[Dict[str, str], str]:
     """
     Parseia filtros da linha de comando no formato campo:valor
@@ -706,7 +644,6 @@ def comando_novo():
     """Executa o comando 'pagto novo'"""
     print("\n=== NOVO PAGAMENTO ===\n")
     
-    contexto = solicitar_contexto()
     categoria = solicitar_input("Categoria", obrigatorio=True)
     beneficiario = solicitar_input("Beneficiário", obrigatorio=True)
     data_pagamento = solicitar_data()
@@ -725,8 +662,7 @@ def comando_novo():
         valor=valor,
         devendo_para=devendo_para,
         pendente=pendente,
-        observacao=observacao,
-        contexto=contexto
+        observacao=observacao
     )
     
     gerenciador = GerenciadorPagamentos()
@@ -822,42 +758,6 @@ def comando_categoria(filtros: Dict[str, str] = None, ordenacao: str = None):
     
     print("-" * 52)
     print(f"{'TOTAL GERAL:':<30} {formatar_moeda(total_geral):>20}\n")
-
-
-def comando_contextos():
-    """Executa o comando 'pagto contextos'"""
-    gerenciador = GerenciadorPagamentos()
-    contextos = gerenciador.listar_contextos()
-    
-    if not contextos:
-        print("\nNenhum contexto encontrado. Crie seu primeiro pagamento!")
-        return
-    
-    print("\n=== CONTEXTOS DISPONÍVEIS ===\n")
-    
-    # Cabeçalho
-    print(f"{'Contexto':<20} {'Total Registros':<18} {'Ativos':<10} {'Total Valor':>20}")
-    print("-" * 72)
-    
-    total_registros = 0
-    total_ativos = 0
-    total_valor = 0.0
-    
-    for ctx in contextos:
-        print(f"{ctx['contexto']:<20} "
-              f"{ctx['total_registros']:<18} "
-              f"{ctx['ativos']:<10} "
-              f"{formatar_moeda(ctx['total_valor'] or 0):>20}")
-        
-        total_registros += ctx['total_registros']
-        total_ativos += ctx['ativos']
-        total_valor += ctx['total_valor'] or 0
-    
-    print("-" * 72)
-    print(f"{'TOTAL:':<20} {total_registros:<18} {total_ativos:<10} {formatar_moeda(total_valor):>20}\n")
-    
-    print("💡 Use contexto:nome para filtrar por contexto")
-    print("   Exemplo: pagto todos contexto:fazenda\n")
 
 
 def comando_delete(id_pagamento: str):
@@ -981,9 +881,6 @@ def comando_editar(id_pagamento: str):
     print("Pressione ENTER para manter o valor atual")
     print("Digite LIMPAR para apagar o campo\n")
     
-    # Mostra contexto atual
-    print(f"🏷️  Contexto atual: {pagamento.get('contexto', 'pessoal')}")
-    
     # Mostra comprovante atual se existir
     if pagamento.get('comprovante'):
         print(f"📎 Comprovante atual: {pagamento.get('comprovante')}")
@@ -993,7 +890,6 @@ def comando_editar(id_pagamento: str):
         print(f"📝 Observação atual: {pagamento.get('observacao')}\n")
     
     # Solicita novos valores (mostrando os atuais)
-    contexto = solicitar_contexto(valor_atual=pagamento.get('contexto'))
     categoria = solicitar_input("Categoria", obrigatorio=True, valor_atual=pagamento.get('categoria'))
     beneficiario = solicitar_input("Beneficiário", obrigatorio=True, valor_atual=pagamento.get('beneficiario'))
     data_pagamento = solicitar_data(valor_atual=pagamento.get('data_pagamento'))
@@ -1015,7 +911,6 @@ def comando_editar(id_pagamento: str):
     
     # Monta o dicionário com os dados atualizados
     dados_atualizados = {
-        'contexto': contexto,
         'categoria': categoria,
         'beneficiario': beneficiario,
         'data_pagamento': data_pagamento,
@@ -1045,36 +940,25 @@ def mostrar_ajuda():
 
 Comandos disponíveis:
 
-  pagto novo              - Registra um novo pagamento (com contexto, comprovante e observação)
+  pagto novo              - Registra um novo pagamento (com comprovante e observação)
   pagto todos             - Lista todos os pagamentos em formato tabular
   pagto categoria         - Mostra total agregado por categoria
-  pagto contextos         - Lista todos os contextos com estatísticas
   pagto delete [id]       - Marca um pagamento como deletado
   pagto deletados         - Lista todos os pagamentos deletados
   pagto editar [id]       - Edita um pagamento existente
   pagto ajuda             - Mostra esta mensagem de ajuda
 
-Contextos:
-  Separe seus pagamentos por contexto (pessoal, fazenda, trabalho, etc.)
-  O contexto padrão é "pessoal"
-  
-  Exemplos:
-    pagto todos contexto:fazenda       - Lista apenas pagamentos da fazenda
-    pagto categoria contexto:trabalho  - Categorias do contexto trabalho
-    pagto contextos                    - Lista todos os contextos
-
 Filtros (aplicáveis em todos, categoria e deletados):
   Use o formato campo:valor para filtrar resultados
   
   Campos disponíveis:
-    categoria, beneficiario, conta, devendo, pendente, data, valor, id, observacao, contexto
+    categoria, beneficiario, conta, devendo, pendente, data, valor, id, observacao
   
   Exemplos de filtros:
     categoria:TRATOR           - Filtra por categoria
     pendente:s                 - Mostra apenas pendentes
     valor:>100                 - Valores maiores que 100
     beneficiario:silva         - Beneficiários que contêm "silva"
-    contexto:fazenda           - Apenas do contexto fazenda
 
 Ordenação (aplicável em todos e deletados):
   Use sort:campo ou sort:-campo para ordenar resultados
@@ -1098,16 +982,10 @@ Exemplos de uso completo:
   pagto novo
   pagto todos
   pagto categoria
-  pagto contextos
   pagto delete 5
   pagto editar 3
   
-  # Com filtros de contexto
-  pagto todos contexto:fazenda
-  pagto categoria contexto:pessoal
-  pagto todos contexto:trabalho pendente:s
-  
-  # Com filtros e ordenação
+  # Com filtros
   pagto todos categoria:Alimentação pendente:s
   pagto categoria conta:Nubank
   pagto todos valor:>100 beneficiario:supermercado
@@ -1115,7 +993,7 @@ Exemplos de uso completo:
   # Com ordenação
   pagto todos sort:-data                    # Mais recentes primeiro
   pagto todos sort:valor                     # Menor valor primeiro
-  pagto todos contexto:fazenda sort:-valor   # Fazenda, maior valor primeiro
+  pagto todos categoria:TRATOR sort:-valor   # TRATOR, maior valor primeiro
   pagto deletados sort:-data                 # Deletados mais recentes primeiro
 
 Ícones nos relatórios:
@@ -1144,8 +1022,6 @@ def main():
         comando_todos(filtros=filtros if filtros else None, ordenacao=ordenacao)
     elif comando == "categoria":
         comando_categoria(filtros=filtros if filtros else None, ordenacao=ordenacao)
-    elif comando == "contextos":
-        comando_contextos()
     elif comando == "delete":
         # Para delete, o segundo argumento é o ID, não um filtro
         if len(sys.argv) < 3 or ':' in sys.argv[2]:
