@@ -690,9 +690,9 @@ def comando_todos(filtros: Dict[str, str] = None, ordenacao: str = None):
     
     print("\n=== TODOS OS PAGAMENTOS ===\n")
     
-    # Cabeçalho da tabela
-    print(f"{'ID':<5} {'Data':<12} {'Categoria':<18} {'Beneficiário':<20} {'Valor':>13} {'Status':<8} {'📎':<3} {'Obs':<3}")
-    print("-" * 95)
+    # Cabeçalho da tabela com Conta incluída
+    print(f"{'ID':<5} {'Data':<12} {'Categoria':<16} {'Beneficiário':<30} {'Conta':<15} {'Valor':>13} {'St':<6} {'📎':<3} {'📝':<3}")
+    print("-" * 120)
     
     total = 0.0
     for pag in pagamentos:
@@ -702,8 +702,8 @@ def comando_todos(filtros: Dict[str, str] = None, ordenacao: str = None):
         except (ValueError, KeyError, TypeError):
             valor = 0.0
         
-        # Status do pagamento
-        status = "⏳ Pend." if pag.get('pendente') == 1 else "✓ Pago"
+        # Status do pagamento (versão curta)
+        status = "⏳Pend" if pag.get('pendente') == 1 else "✓Pago"
         
         # Indicador de comprovante
         comp_icon = "📎" if pag.get('comprovante') else ""
@@ -713,15 +713,16 @@ def comando_todos(filtros: Dict[str, str] = None, ordenacao: str = None):
         
         print(f"{pag.get('id', 0):<5} "
               f"{pag.get('data_pagamento', ''):<12} "
-              f"{pag.get('categoria', '')[:17]:<18} "
-              f"{pag.get('beneficiario', '')[:19]:<20} "
+              f"{pag.get('categoria', '')[:15]:<16} "
+              f"{pag.get('beneficiario', '')[:29]:<30} "
+              f"{pag.get('conta', '')[:14]:<15} "
               f"{formatar_moeda(valor):>13} "
-              f"{status:<8} "
+              f"{status:<6} "
               f"{comp_icon:<3} "
               f"{obs_icon:<3}")
     
-    print("-" * 95)
-    print(f"{'TOTAL:':<50} {formatar_moeda(total):>13}")
+    print("-" * 120)
+    print(f"{'TOTAL:':<78} {formatar_moeda(total):>13}")
     print(f"\nRegistros encontrados: {len(pagamentos)}\n")
 
 
@@ -822,9 +823,9 @@ def comando_deletados(filtros: Dict[str, str] = None, ordenacao: str = None):
     
     print("\n=== PAGAMENTOS DELETADOS ===\n")
     
-    # Cabeçalho da tabela  
-    print(f"{'ID':<5} {'Data':<12} {'Categoria':<18} {'Beneficiário':<20} {'Valor':>13} {'📎':<3} {'📝':<3}")
-    print("-" * 85)
+    # Cabeçalho da tabela com Conta incluída
+    print(f"{'ID':<5} {'Data':<12} {'Categoria':<16} {'Beneficiário':<30} {'Conta':<15} {'Valor':>13} {'📎':<3} {'📝':<3}")
+    print("-" * 110)
     
     total = 0.0
     for pag in pagamentos:
@@ -842,14 +843,15 @@ def comando_deletados(filtros: Dict[str, str] = None, ordenacao: str = None):
         
         print(f"{pag.get('id', 0):<5} "
               f"{pag.get('data_pagamento', ''):<12} "
-              f"{pag.get('categoria', '')[:17]:<18} "
-              f"{pag.get('beneficiario', '')[:19]:<20} "
+              f"{pag.get('categoria', '')[:15]:<16} "
+              f"{pag.get('beneficiario', '')[:29]:<30} "
+              f"{pag.get('conta', '')[:14]:<15} "
               f"{formatar_moeda(valor):>13} "
               f"{comp_icon:<3} "
               f"{obs_icon:<3}")
     
-    print("-" * 85)
-    print(f"{'TOTAL:':<50} {formatar_moeda(total):>13}")
+    print("-" * 110)
+    print(f"{'TOTAL:':<78} {formatar_moeda(total):>13}")
     print(f"\nRegistros encontrados: {len(pagamentos)}\n")
 
 
